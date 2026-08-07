@@ -10,7 +10,7 @@
   "plugins": [
     {
       "name": "gft",
-      "version": "0.1.0",
+      "version": "0.1.1",
       "source": "./plugin",
       "description": "GFT for Claude Code: instant /gft:list & /gft:login (zero tokens via hook), /gft:link & /gft:save for connecting thinking maps, MCP server auto-configured"
     }

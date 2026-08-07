@@ -21,7 +21,7 @@ process.stdin.on('end', () => {
 
   if (m[1] === 'list') {
     // server 约定：日志走 stderr（[gft-mcp] …），名单本体走 stdout
-    const r = spawnSync('npx', ['-y', 'gft-mcp', '--check', '--list'], {
+    const r = spawnSync('npx', ['-y', 'gft-mcp@latest', '--check', '--list'], {
       encoding: 'utf8', timeout: 15000, shell: IS_WIN,
     });
     const out = (r.stdout || '').trim();
@@ -33,7 +33,7 @@ process.stdin.on('end', () => {
     }
   } else {
     // login：要开浏览器等人点，detached 后台跑、立即返回，不占 hook 时限
-    const child = spawn('npx', ['-y', 'gft-mcp', '--login-web'], {
+    const child = spawn('npx', ['-y', 'gft-mcp@latest', '--login-web'], {
       detached: true, stdio: 'ignore', shell: IS_WIN,
     });
     child.unref();

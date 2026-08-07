@@ -1,6 +1,6 @@
 {
   "name": "gft",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "GFT (Git for Thought) — bring your white-box thinking map into Claude Code: /gft:list & /gft:login answer instantly (zero tokens), /gft:link & /gft:save connect your maps to the conversation.",
   "author": {
     "name": "CL"
