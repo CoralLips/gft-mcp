@@ -1,0 +1,18 @@
+{
+  "name": "gft-mcp",
+  "owner": {
+    "name": "CL"
+  },
+  "metadata": {
+    "description": "GFT (Git for Thought) integrations — connect your white-box thinking map to any AI agent",
+    "homepage": "https://gitforthought.com"
+  },
+  "plugins": [
+    {
+      "name": "gft",
+      "version": "0.1.0",
+      "source": "./plugin",
+      "description": "GFT for Claude Code: instant /gft:list & /gft:login (zero tokens via hook), /gft:link & /gft:save for connecting thinking maps, MCP server auto-configured"
+    }
+  ]
+}

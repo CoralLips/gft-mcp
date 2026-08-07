@@ -1,0 +1,9 @@
+node_modules/
+*.log
+.DS_Store
+
+# MCP 接入配置与凭证——绝不能提交
+.mcp.json
+.gft-mcp/
+.env
+.env.*

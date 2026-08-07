@@ -1,0 +1,20 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.CoralLips/gft-mcp",
+  "description": "Bring your GFT (Git for Thought) white-box thinking map to any AI agent. 把你的思维脉络接给任何 agent。",
+  "repository": {
+    "url": "https://github.com/CoralLips/gft-mcp",
+    "source": "github"
+  },
+  "version": "0.1.3",
+  "packages": [
+    {
+      "registryType": "npm",
+      "identifier": "gft-mcp",
+      "version": "0.1.3",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

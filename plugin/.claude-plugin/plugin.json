@@ -1,0 +1,17 @@
+{
+  "name": "gft",
+  "version": "0.1.0",
+  "description": "GFT (Git for Thought) — bring your white-box thinking map into Claude Code: /gft:list & /gft:login answer instantly (zero tokens), /gft:link & /gft:save connect your maps to the conversation.",
+  "author": {
+    "name": "CL"
+  },
+  "repository": "https://github.com/CoralLips/gft-mcp",
+  "license": "MIT",
+  "keywords": [
+    "gft",
+    "thinking-map",
+    "white-box-context",
+    "mcp",
+    "memory"
+  ]
+}
