@@ -381,13 +381,20 @@ const PROMPTS = [
 async function main() {
   const server = new Server({ name: 'gft', version: '0.2.0' }, { capabilities: { tools: {}, prompts: {} } });
 
-  server.setRequestHandler(ListPromptsRequestSchema, async () => ({
-    prompts: PROMPTS.map(p => ({
-      name: p.name,
-      description: p.description,
-      ...(p.args ? { arguments: p.args } : {}),
-    })),
-  }));
+  server.setRequestHandler(ListPromptsRequestSchema, async () => {
+    // 分层让位（2026-8-7 用户拍）：Claude Code 环境有 plugin 那套优化命令（hook 秒回），
+    // MCP prompts 再全量暴露=斜杠菜单双份重复。认出 client 是 Claude Code 就交空列表——
+    // 其他 client（Cursor 等）prompts 是唯一命令入口，照常全量。
+    const client = server.getClientVersion?.()?.name ?? '';
+    if (/claude/i.test(client)) return { prompts: [] };
+    return {
+      prompts: PROMPTS.map(p => ({
+        name: p.name,
+        description: p.description,
+        ...(p.args ? { arguments: p.args } : {}),
+      })),
+    };
+  });
 
   server.setRequestHandler(GetPromptRequestSchema, async req => {
     const p = PROMPTS.find(x => x.name === req.params.name);
