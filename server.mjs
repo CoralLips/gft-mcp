@@ -141,47 +141,64 @@ export async function connect() {
 
 // ===== 数据访问 =====
 
-/** 取一张图的原始行 + 项目名；projectQuery 为空则取最近更新的那张 */
+/** 取一张图的原始行 + 项目名；projectQuery 为空则取最近更新的那张。
+ *  空图（project 已建、还没长过脉络）也可被指名匹配——返回 isNew:true 的合成空行，
+ *  首次 submit 落成真行（2026-8-7 用户拍：用户视角"项目已建"，agent 就必须看得见）。 */
 async function fetchMapRow(supabase, projectQuery) {
-  const { data: maps, error } = await supabase
-    .from('thinking_maps')
-    .select('project_id, nodes, edges, watermarks, updated_at')
-    .order('updated_at', { ascending: false });
-  if (error) throw new Error(`读取脉络失败：${error.message}`);
-  if (!maps?.length) return null;
+  const [mapsRes, projRes] = await Promise.all([
+    supabase.from('thinking_maps')
+      .select('project_id, nodes, edges, watermarks, updated_at')
+      .order('updated_at', { ascending: false }),
+    supabase.from('projects').select('id, name'),
+  ]);
+  if (mapsRes.error) throw new Error(`读取脉络失败：${mapsRes.error.message}`);
+  const maps = mapsRes.data ?? [];
+  const projects = projRes.data ?? [];
+  const nameOf = id => projects.find(p => p.id === id)?.name ?? '未命名脉络';
+  const emptyProjects = () => projects.filter(p => !maps.some(m => m.project_id === p.id));
+  const othersOf = keepId => [
+    ...maps.filter(m => m.project_id !== keepId).map(m => ({ name: nameOf(m.project_id) })),
+    ...emptyProjects().filter(p => p.id !== keepId).map(p => ({ name: `${p.name}（空）` })),
+  ];
 
-  const { data: projects } = await supabase
-    .from('projects').select('id, name').in('id', maps.map(m => m.project_id));
-  const nameOf = id => projects?.find(p => p.id === id)?.name ?? '未命名脉络';
-
-  let picked = maps[0];
   if (projectQuery?.trim()) {
     const q = projectQuery.trim().toLowerCase();
     const hit = maps.find(m => nameOf(m.project_id).toLowerCase().includes(q));
-    if (!hit) throw new Error(`没有名字含「${projectQuery}」的脉络。可选：${maps.map(m => nameOf(m.project_id)).join('、')}`);
-    picked = hit;
+    if (hit) return { row: hit, name: nameOf(hit.project_id), others: othersOf(hit.project_id), isNew: false };
+    // 图里没有 → 空 project 里找（图还没出生，指名即认）
+    const emptyHit = emptyProjects().find(p => p.name.toLowerCase().includes(q));
+    if (emptyHit) {
+      return {
+        row: { project_id: emptyHit.id, nodes: [], edges: [], watermarks: {}, updated_at: null },
+        name: emptyHit.name, others: othersOf(emptyHit.id), isNew: true,
+      };
+    }
+    const all = [...maps.map(m => nameOf(m.project_id)), ...emptyProjects().map(p => `${p.name}（空）`)];
+    throw new Error(`没有名字含「${projectQuery}」的脉络。可选：${all.join('、')}`);
   }
-  return {
-    row: picked,
-    name: nameOf(picked.project_id),
-    others: maps.filter(m => m.project_id !== picked.project_id).map(m => ({ name: nameOf(m.project_id) })),
-  };
+  if (!maps.length) return null;
+  return { row: maps[0], name: nameOf(maps[0].project_id), others: othersOf(maps[0].project_id), isNew: false };
 }
 
 const EMPTY_HINT = '你在 GFT 里还没有思维脉络。先去 gitforthought.com 聊一段并生成脉络，再回来。';
 
 /** 轻名单：图名 + 条数 + 各线新鲜度。零节点内容——选图决策用,别拿它代替 read */
 async function handleList(supabase) {
-  const { data: maps, error } = await supabase
-    .from('thinking_maps')
-    .select('project_id, nodes, watermarks, updated_at')
-    .order('updated_at', { ascending: false });
-  if (error) throw new Error(`读取失败：${error.message}`);
-  if (!maps?.length) return EMPTY_HINT;
+  // 以 projects 为主表：空图（刚建的 project、还没长过脉络）也要可见——
+  // 用户视角"项目已建"而 agent 看不见=两边对"存在"的定义不同步（2026-8-7 用户拍：不符直觉）
+  const [mapsRes, projRes] = await Promise.all([
+    supabase.from('thinking_maps')
+      .select('project_id, nodes, watermarks, updated_at')
+      .order('updated_at', { ascending: false }),
+    supabase.from('projects').select('id, name'),
+  ]);
+  if (mapsRes.error) throw new Error(`读取失败：${mapsRes.error.message}`);
+  const maps = mapsRes.data ?? [];
+  const projects = projRes.data ?? [];
+  if (!maps.length && !projects.length) return EMPTY_HINT;
 
-  const { data: projects } = await supabase
-    .from('projects').select('id, name').in('id', maps.map(m => m.project_id));
-  const nameOf = id => projects?.find(p => p.id === id)?.name ?? '未命名脉络';
+  const nameOf = id => projects.find(p => p.id === id)?.name ?? '未命名脉络';
+  const empties = projects.filter(p => !maps.some(m => m.project_id === p.id));
 
   const rows = maps.map((m, i) => {
     const count = (m.nodes ?? []).filter(n => !n.condensedInto).length;
@@ -189,9 +206,12 @@ async function handleList(supabase) {
       .map(l => `${l.label} ${humanAge(l.at)}`).join(' · ');
     return `${i + 1}. ${nameOf(m.project_id)} — ${count} 条${lines ? ` · ${lines}` : ''}`;
   });
+  const emptyRows = empties.map((p, i) =>
+    `${maps.length + i + 1}. ${p.name} — 空 · 还没长过脉络（可直接链接，首次存判断时自动建图）`);
   return [
-    `你的思维脉络（${maps.length} 张）：`,
+    `你的思维脉络（${maps.length + empties.length} 张${empties.length ? `，其中 ${empties.length} 张空` : ''}）：`,
     ...rows,
+    ...emptyRows,
     '',
     '要用哪张：read_thinking_map(project=图名) 把它带进本场（即「链接」）。',
   ].join('\n');
@@ -202,7 +222,10 @@ async function handleRead(supabase, { project, for_update }) {
   if (!found) return EMPTY_HINT;
 
   const { row, name, others } = found;
-  const readable = renderMap(name, groupNodes(row.nodes, row.edges), others);
+  const newborn = found.isNew
+    ? `（「${name}」还是一张空图——直接开聊即可；之后 submit_map_update 首次提交会自动建图。）\n\n`
+    : '';
+  const readable = newborn + renderMap(name, groupNodes(row.nodes, row.edges), others);
   if (!for_update) return readable;
 
   // 更新模式：额外给别名映射 + GFT 的抽取规则 + 各方水位（带身份,agent 认自己的那条）
@@ -229,13 +252,14 @@ async function handleSubmit(supabase, { project, tags, cursor, agent_id }) {
   const watermarks = { ...(row.watermarks ?? {}) };
   if (cursor?.trim()) watermarks[extKey(agent_id)] = cursor.trim();
 
-  const { error } = await supabase
-    .from('thinking_maps')
-    .update({
-      nodes: merged.nodes, edges: merged.edges, watermarks,
-      updated_at: new Date().toISOString(),
-    })
-    .eq('project_id', row.project_id);
+  const payload = {
+    nodes: merged.nodes, edges: merged.edges, watermarks,
+    updated_at: new Date().toISOString(),
+  };
+  // 空图首次提交=建行（insert）；已有图=增量更新
+  const { error } = found.isNew
+    ? await supabase.from('thinking_maps').insert({ project_id: row.project_id, ...payload })
+    : await supabase.from('thinking_maps').update(payload).eq('project_id', row.project_id);
   if (error) throw new Error(`写回失败：${error.message}`);
 
   // 返回值是**给用户看的**：写了什么必须当场说清,否则等于偷偷改他的东西
