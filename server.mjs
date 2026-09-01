@@ -2,13 +2,15 @@
 /**
  * GFT MCP Server — 把你在 GFT 里确认过的思考资产（思维脉络）接给通用 agent。
  *
- * 设计定位（2026-08-04/05）：**说话可以外包，认账必须回流。**
- * 本 server 只做「验 / 存 / 供」三件事，**零 AI 调用、零 GFT token 消耗**——
- * 推理与抽取全部由调用方 agent 用它自己的额度完成，执行的却是 GFT 的规则（prompts.mjs）。
+ * 设计定位（2026-09-01 写入归一，用户拍板"体验统一性最高优先级"）：
+ * 本 server 是**薄搬运层**——agent 只管连图 / 喂对话原文 / 读回；
+ * 生成（prompt / 解析 / 落文档＋图＋锚）全在 GFT 平台端点（api/map-update）跑，
+ * 与网页端同一条管道、同一份规则。旧"零 AI、agent 自带 token"前提已废
+ * （规则复制到客户端＝必然漂移，8-27 起实际分叉为证）。
  *
  * 两个 tool：
- *   read_thinking_map   供：读脉络；for_update=true 时连抽取规则和旧图别名一起给
- *   submit_map_update   验+存：解析 agent 抽出的标签 → 校验 → 增量并入 → 落库
+ *   read_thinking_map   供：读脉络（图＋白盒文档全文）；for_update=true 附各线水位与提交指引
+ *   submit_map_update   搬运：对话原文 POST 给平台端点 → 平台生成落库 → 转告知情回执
  *
  * ⚠ stdio 传输下 stdout 属于 MCP 协议，任何日志必须走 stderr，否则协议流被污染。
  */
@@ -22,7 +24,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { groupNodes, renderMap, serializePreviousMap, parseTags, mergeIncremental, summarizeLines, humanAge } from './map.mjs';
+import { groupNodes, renderMap, summarizeLines, humanAge } from './map.mjs';
 import { buildUpdateInstruction } from './prompts.mjs';
 
 const log = (...args) => console.error('[gft-mcp]', ...args);
@@ -33,7 +35,6 @@ const log = (...args) => console.error('[gft-mcp]', ...args);
  * 单 key 会互相覆盖进度(A 写到 40 轮,B 一提交就盖掉)——各记各的,读时各认各的。
  */
 const EXT_WM_PREFIX = 'ext:agent:';
-const extKey = agentId => `${EXT_WM_PREFIX}${(agentId ?? '').trim() || 'default'}`;
 
 // ===== 配置 =====
 
@@ -234,49 +235,42 @@ async function handleRead(supabase, { project, for_update }) {
   const readable = newborn + renderMap(name, groupNodes(row.nodes, row.edges), others) + docSection;
   if (!for_update) return readable;
 
-  // 更新模式：额外给别名映射 + GFT 的抽取规则 + 各方水位（带身份,agent 认自己的那条）
-  const serialized = serializePreviousMap(row.nodes, row.edges);
+  // 更新模式：附各线水位 + 提交指引（写入归一后不再下发抽取规则——生成归平台）
   const extMarks = Object.entries(row.watermarks ?? {})
     .filter(([k]) => k.startsWith(EXT_WM_PREFIX))
     .map(([k, v]) => ({ id: k.slice(EXT_WM_PREFIX.length), cursor: v }));
-  return `${readable}\n\n${'='.repeat(48)}\n${buildUpdateInstruction(serialized.text, extMarks)}`;
+  return `${readable}\n\n${'='.repeat(48)}\n${buildUpdateInstruction(extMarks)}`;
 }
 
-async function handleSubmit(supabase, { project, tags, cursor, agent_id }) {
-  if (!tags?.trim()) throw new Error('tags 是空的——先调 read_thinking_map(for_update=true) 拿规则,按规则抽完再提交');
-  const found = await fetchMapRow(supabase, project);
-  if (!found) return EMPTY_HINT;
+/** 平台端点基址（写入归一 2026-09-01）：生成全在 GFT 侧跑；本地联调可用 GFT_API_BASE 指向 vercel dev */
+const API_BASE = process.env.GFT_API_BASE || 'https://gitforthought.com';
 
-  const { row, name } = found;
-  const parsed = parseTags(tags);
-  if (parsed.noop && parsed.nodes.length === 0) return `「${name}」没有需要补充的新判断（本次记为 noop）。`;
-  if (parsed.nodes.length === 0) {
-    throw new Error('没解析出任何 <node/>。检查格式：<node id="m1" title="..." body="..."/>，一行一个。');
-  }
+async function handleSubmit(supabase, { project, raw_text, cursor, agent_id }) {
+  const raw = (raw_text ?? '').trim();
+  if (!raw) throw new Error('raw_text 是空的——把水位之后的对话原文传进来（不需要抽取，生成由平台完成）');
+  if (!project?.trim()) throw new Error('project 是必填的——写入目标必须显式指名，不许赌"最近的那张"');
 
-  const merged = mergeIncremental(row.nodes, row.edges, parsed);
-  const watermarks = { ...(row.watermarks ?? {}) };
-  if (cursor?.trim()) watermarks[extKey(agent_id)] = cursor.trim();
+  const { data: sessData } = await supabase.auth.getSession();
+  const token = sessData?.session?.access_token;
+  if (!token) throw new Error('凭证不可用——重跑 npx gft-mcp --login-web');
 
-  const payload = {
-    nodes: merged.nodes, edges: merged.edges, watermarks,
-    updated_at: new Date().toISOString(),
-  };
-  // 空图首次提交=建行（insert）；已有图=增量更新
-  const { error } = found.isNew
-    ? await supabase.from('thinking_maps').insert({ project_id: row.project_id, ...payload })
-    : await supabase.from('thinking_maps').update(payload).eq('project_id', row.project_id);
-  if (error) throw new Error(`写回失败：${error.message}`);
+  const resp = await fetch(`${API_BASE}/api/map-update`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify({ project: project.trim(), raw_text: raw, cursor, agent_id: (agent_id ?? '').trim() || 'default' }),
+  });
+  const json = await resp.json().catch(() => null);
+  if (!resp.ok) throw new Error(`平台生成失败(${resp.status})：${json?.error ?? '未知错误'}`);
+  if (json?.noop) return json.message ?? '这段对话没有需要记的新判断（noop）。';
 
   // 返回值是**给用户看的**：写了什么必须当场说清,否则等于偷偷改他的东西
   const lines = [
-    `✅ 已并入「${name}」：新增 ${merged.added.length} 条判断、${merged.addedEdges} 条连线。`,
-    ...merged.added.map(n => `  + ${n.title}`),
+    `✅ 已并入「${json.project}」（GFT 平台管道生成，与网页端同一份规则）：` +
+      `新增 ${json.added?.length ?? 0} 条判断、写入 ${json.entries ?? 0} 条文档条目${json.marks ? `、改标 ${json.marks} 处` : ''}。`,
+    ...(json.added ?? []).map(t => `  + ${t}`),
+    '',
+    `图上现有 ${json.totalNodes} 条判断，白盒文档 ${json.docChars} 字。新节点带未读标记,去 GFT 点开即消；不认同就直接删。`,
   ];
-  if (merged.skipped.length) {
-    lines.push('', '以下被规则挡下（图只生长、不改写历史）：', ...merged.skipped.map(s => `  ⏭ ${s}`));
-  }
-  lines.push('', `图上现有 ${merged.nodes.filter(n => !n.condensedInto).length} 条判断。新节点带未读标记,去 GFT 点开即消；不认同就直接删。`);
   return lines.join('\n');
 }
 
@@ -301,42 +295,42 @@ const TOOLS = [
       '一场会话拉一次即可——内容不会在对话中途改变，反复调用只是浪费用户的 token。\n' +
       '选图：本场聊过哪张就继续用哪张；语境不明且用户没指名时，把返回里列出的可选项目报给用户挑，' +
       '**不要赌"最近更新的那张"**——那可能是用户在别的 session 里喂的图。\n' +
-      '若用户要把这场对话的新判断存进脉络，用 for_update=true 再调一次：' +
-      '会额外返回抽取规则和旧图别名，按那份规则抽完再调 submit_map_update。',
+      '若用户要把这场对话的新内容存进脉络，用 for_update=true 再调一次：' +
+      '会附带各线水位与提交指引，然后把水位之后的对话原文交给 submit_map_update。',
     inputSchema: {
       type: 'object',
       properties: {
         project: { type: 'string', description: '按项目名模糊匹配指定读哪张脉络。不传 = 最近更新的那张（多数情况不用传）。' },
-        for_update: { type: 'boolean', description: '要往脉络里补新判断时传 true，会附带抽取规则与旧图别名。默认 false。' },
+        for_update: { type: 'boolean', description: '要往脉络里存新内容时传 true，会附带各线水位与提交指引。默认 false。' },
       },
     },
   },
   {
     name: 'submit_map_update',
     description:
-      '把这场对话里长出来的新判断增量并入用户的思维脉络。\n' +
-      '**必须先调 read_thinking_map(for_update=true)**，拿到抽取规则和旧图别名，' +
-      '按那份规则抽出 <node/> / <edge/> 标签后，原样传进 tags。\n' +
-      '规则由 GFT 定，你只出算力：只抽用户真说了的判断，你自己的分析除非他明确接住否则不上图；' +
-      '旧节点一律不重输出；没有新东西就传 <noop/>。',
+      '把这场对话的新内容存进用户的思维脉络。你**不需要抽取判断、不需要遵守任何格式规则**——' +
+      '把水位之后的对话原文传进来，生成（判断＋白盒文档＋锚）由 GFT 平台完成，' +
+      '与网页端同一条管道、同一份规则。\n' +
+      '先调 read_thinking_map(for_update=true) 看自己那条线的水位，只传水位之后的增量；' +
+      '用户的原话务必完整保留，你的回答保留要点即可。平台返回知情回执，原样转告用户。',
     inputSchema: {
       type: 'object',
       properties: {
-        tags: {
+        raw_text: {
           type: 'string',
-          description: '按规则抽出的标签原文，一行一个，如：<node id="m1" title="..." body="..."/> 与 <edge from="n2" to="m1"/>。没有新东西时传 <noop/>。',
+          description: '水位之后的对话原文（纯文本）。用户说的话完整保留，你的回答保留要点，寒暄可略。',
         },
+        project: { type: 'string', description: '写进哪张脉络（必填）——写入目标必须显式指名，不许赌"最近的那张"。' },
         cursor: {
           type: 'string',
-          description: '本次抽到哪的标记，下次接着走。例："2026-08-05 关于 MCP 外接的讨论，至第 40 轮"。',
+          description: '本次交到哪的标记，下次接着走。例："2026-09-01 关于渠道选择的讨论，至平台对比"。',
         },
         agent_id: {
           type: 'string',
           description: '你这条对话线的稳定标识（如工作目录名或话题名）。同一张图可能被多个 session 喂,水位按此分开记,别省略。',
         },
-        project: { type: 'string', description: '写进哪张脉络，同 read_thinking_map。不传 = 最近更新的那张。' },
       },
-      required: ['tags'],
+      required: ['raw_text', 'project'],
     },
   },
 ];
@@ -365,12 +359,12 @@ const PROMPTS = [
   },
   {
     name: 'save',
-    description: '把本场对话的新判断增量存回已链接的思维脉络',
+    description: '把本场对话的新内容存回已链接的思维脉络（生成由平台完成）',
     text:
-      '把本场新判断存回 GFT:①确认本场链接的图(读/喂过哪张就是哪张;没有则先走 link 流程选图)。' +
-      '②调 read_thinking_map(project=图名, for_update=true) 拿旧图别名+抽取规则+各线水位。' +
-      '③按规则抽取——只抽用户真说了的新判断,对照自己那条线的水位只看其后的对话。' +
-      '④调 submit_map_update(tags=标签,无新东西传 <noop/>; cursor=本次抽到哪; agent_id=当前工作目录名)。' +
+      '把本场新内容存回 GFT:①确认本场链接的图(读/喂过哪张就是哪张;没有则先走 link 流程选图)。' +
+      '②调 read_thinking_map(project=图名, for_update=true) 看自己那条线的水位。' +
+      '③把水位之后的对话整理为纯文本原文——用户的话完整保留,你的回答留要点,寒暄略;**不需要抽取判断**,生成归平台。' +
+      '④调 submit_map_update(raw_text=原文; project=图名; cursor=本次交到哪; agent_id=当前工作目录名)。' +
       '⑤把知情回执原样告诉用户。',
   },
   {

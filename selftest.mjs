@@ -17,7 +17,7 @@ import {
   groupNodes, renderMap, serializePreviousMap, parseTags, mergeIncremental, stripWrapQuotes,
   summarizeLines, humanAge,
 } from './map.mjs';
-import { DRIFT_ANCHORS, SHARED_RULES, buildUpdateInstruction } from './prompts.mjs';
+import { buildUpdateInstruction } from './prompts.mjs';
 
 let pass = 0;
 let fail = 0;
@@ -192,44 +192,23 @@ console.log('\n【引号成对才剥】');
   ok('空串不炸', stripWrapQuotes('') === '' && stripWrapQuotes(undefined) === '');
 }
 
-console.log('\n【更新指令】');
+console.log('\n【提交指引（写入归一版：不下发规则、只教搬运）】');
 {
-  const withMark = buildUpdateInstruction('节点：\nn1: 某判断', [
+  const withMark = buildUpdateInstruction([
     { id: 'git-for-thought', cursor: '2026-08-05 至第 40 轮' },
     { id: 'other-line', cursor: '2026-08-04 至第 12 轮' },
   ]);
-  const noMark = buildUpdateInstruction('节点：\n（空图）', []);
+  const noMark = buildUpdateInstruction([]);
 
-  ok('带上旧图', withMark.includes('n1: 某判断'));
-  ok('多方水位并列且带身份', withMark.includes('[git-for-thought] 2026-08-05 至第 40 轮') && withMark.includes('[other-line]'));
-  ok('指示只认自己那条', withMark.includes('认你自己那条'));
-  ok('无水位时说明从头看', noMark.includes('从头看起'));
-  ok('钉死「to 只能是新节点」', withMark.includes('to 只能是新节点'));
-  ok('钉死「只抽用户真说了的」', withMark.includes('只抽**用户真说了的**新判断'));
-  ok('给出 noop 出口', withMark.includes('<noop/>'));
-  ok('含完整共享规则', withMark.includes(SHARED_RULES));
-  ok('指示抽完调 submit 并自报 agent_id', withMark.includes('submit_map_update') && withMark.includes('agent_id'));
-  ok('旧签名(单字符串)兼容不炸', buildUpdateInstruction('x', '旧游标').includes('旧游标'));
+  ok('多方水位并列且带身份', withMark.includes('git-for-thought：上次交到「2026-08-05 至第 40 轮」') && withMark.includes('other-line'));
+  ok('无水位时说明从头传', noMark.includes('从头传起'));
+  ok('明说不需要抽取/无格式规则', withMark.includes('不需要抽取判断'));
+  ok('指示调 submit 并自报 agent_id', withMark.includes('submit_map_update') && withMark.includes('agent_id'));
+  ok('要求用户原话完整保留', withMark.includes('完整保留'));
 }
 
-console.log('\n【防漂移：与 TS 源逐句比对】');
-{
-  // 独立仓后 TS 源不在 ../ 了：GFT_SRC 指向主仓根即可跑全量防漂移（本机开发用）；
-  // 不设则跳过（CI/外部环境拿不到私有主仓，属正常）
-  const srcRoot = process.env.GFT_SRC || join(dirname(fileURLToPath(import.meta.url)), '..');
-  const tsPath = join(srcRoot, 'src', 'service', 'thinkingMapService.ts');
-  let ts = null;
-  try { ts = readFileSync(tsPath, 'utf8'); } catch { /* 读不到=没主仓可比 */ }
-
-  if (!ts) {
-    console.log('  ⏭ 读不到 TS 源（设 GFT_SRC=主仓根路径 可跑全量防漂移），跳过比对');
-  } else {
-    DRIFT_ANCHORS.forEach(anchor => {
-      ok(`规则未漂移：${anchor.slice(0, 22)}…`, ts.includes(anchor) && SHARED_RULES.includes(anchor));
-    });
-    ok('节点数上限与 TS 一致（NODE_CAP_MAX=12）', /NODE_CAP_MAX\s*=\s*12/.test(ts));
-  }
-}
+// 防漂移比对已删（2026-09-01 写入归一）：规则单源在平台端点（api/map-update 复用
+// thinkingMapService 同一模块），客户端不再持有规则副本——没有副本就没有漂移。
 
 console.log(`\n${fail === 0 ? '✅ 全绿' : '❌ 有挂'}：${pass} 通过 / ${fail} 失败\n`);
 process.exit(fail === 0 ? 0 : 1);
