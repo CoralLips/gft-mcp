@@ -147,7 +147,7 @@ export async function connect() {
 async function fetchMapRow(supabase, projectQuery) {
   const [mapsRes, projRes] = await Promise.all([
     supabase.from('thinking_maps')
-      .select('project_id, nodes, edges, watermarks, updated_at')
+      .select('project_id, nodes, edges, watermarks, doc, updated_at')
       .order('updated_at', { ascending: false }),
     supabase.from('projects').select('id, name'),
   ]);
@@ -169,7 +169,7 @@ async function fetchMapRow(supabase, projectQuery) {
     const emptyHit = emptyProjects().find(p => p.name.toLowerCase().includes(q));
     if (emptyHit) {
       return {
-        row: { project_id: emptyHit.id, nodes: [], edges: [], watermarks: {}, updated_at: null },
+        row: { project_id: emptyHit.id, nodes: [], edges: [], watermarks: {}, doc: '', updated_at: null },
         name: emptyHit.name, others: othersOf(emptyHit.id), isNew: true,
       };
     }
@@ -225,7 +225,13 @@ async function handleRead(supabase, { project, for_update }) {
   const newborn = found.isNew
     ? `（「${name}」还是一张空图——直接开聊即可；之后 submit_map_update 首次提交会自动建图。）\n\n`
     : '';
-  const readable = newborn + renderMap(name, groupNodes(row.nodes, row.edges), others);
+  // 白盒文档 = 判断正本全文（2026-09-01 对齐：此前只回图=只给了目录，正本出不了门）。
+  // 老图没有 doc 属正常（文档 8-22 才诞生）——为空时整段省略，不做迁移。
+  const docText = (row.doc ?? '').trim();
+  const docSection = docText
+    ? `\n\n# 白盒文档（判断正本全文——图是它的目录，锚 ^jN 对应图上节点）\n\n${docText}`
+    : '';
+  const readable = newborn + renderMap(name, groupNodes(row.nodes, row.edges), others) + docSection;
   if (!for_update) return readable;
 
   // 更新模式：额外给别名映射 + GFT 的抽取规则 + 各方水位（带身份,agent 认自己的那条）
