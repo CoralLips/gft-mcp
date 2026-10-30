@@ -120,8 +120,7 @@ Claude Code 用户的妙用：在输入框用 **`!` 前缀**跑（如 `! npx gft
 ## 给开发者
 
 - 本包**零 AI 调用**：server 只做「验 / 存 / 供」（校验、增量合并、供图），抽取规则随 `read(for_update)` 下发，由你的 agent 用自己的模型执行
-- 判据随包走：`node selftest.mjs`（78 条，零网络零 API）
 - 在 GFT 仓库内运行时自动切换本地开发环境（授权页指 `localhost:3000`）；`GFT_WEB_URL` / `GFT_SUPABASE_URL` / `GFT_SUPABASE_ANON_KEY` 环境变量可覆盖一切默认值
-- ⚠ 改 `map.mjs` 的 `isOpen()` 必须同步 GFT 画布口径，先跑判据
+- ⚠ 改 `map.mjs` 的 `isOpen()` 必须同步 GFT 画布口径
 
 MIT License · [gitforthought.com](https://gitforthought.com)

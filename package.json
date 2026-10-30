@@ -10,12 +10,10 @@
     "server.mjs",
     "map.mjs",
     "prompts.mjs",
-    "selftest.mjs",
     "README.md"
   ],
   "scripts": {
-    "check": "node server.mjs --check",
-    "test": "node selftest.mjs"
+    "check": "node server.mjs --check"
   },
   "keywords": [
     "mcp",
