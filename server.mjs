@@ -24,7 +24,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { summarizeLines, humanAge, selectProject, readMemory, sourcePage } from './map.mjs';
+import { summarizeLines, humanAge, selectProject, readMemory } from './map.mjs';
 import { buildUpdateInstruction } from './prompts.mjs';
 
 const log = (...args) => console.error('[gft-mcp]', ...args);
@@ -239,11 +239,6 @@ async function handleSubmit(supabase, { project, raw_text, cursor, agent_id }) {
 
 // ===== MCP =====
 
-async function handleSources(supabase,{project,cursor}) {
-  const {row} = await fetchMapRow(supabase,project,'project_id, raw, updated_at');
-  return JSON.stringify(sourcePage(row.project_id,row.raw || '',cursor),null,2);
-}
-
 const TOOLS = [
   {
     name: 'list_thinking_maps',
@@ -260,7 +255,7 @@ const TOOLS = [
       '已经想通的判断、还悬着的问题、已经否决的方向。\n' +
       '什么时候调用：用户提到他之前的判断/想法/正在纠结的问题时；' +
       '或你要给出建议、而这个建议应该建立在他已有的思考之上时；或他直接说「读一下我的脉络」时。\n' +
-      '先查看索引的更新时间；已加载且未变化时复用，用户修改或内容缺失时重读。默认只返回 Doc 与精简图结构；细节传 node_ids，来源用 read_thinking_map_sources。\n' +
+      '先查看索引的更新时间；已加载且未变化时复用，用户修改或内容缺失时重读。默认只返回 Doc 与精简图结构；细节传 node_ids。\n' +
       '选图：本场聊过哪张就继续用哪张；语境不明且用户没指名时，把返回里列出的可选项目报给用户挑，' +
       '**不要赌"最近更新的那张"**——那可能是用户在别的 session 里喂的图。\n' +
       '若用户要把这场对话的新内容存进脉络，用 for_update=true 再调一次：' +
@@ -275,7 +270,6 @@ const TOOLS = [
       required: ['project'],
     },
   },
-  {name:'read_thinking_map_sources',description:'按明确主题分页读取已接收的 Log 来源。仅在核对依据时使用；每页最多12000字符，用 nextCursor 继续；不含尚未导入的原聊天。旧版提取记录不等于完整原文。',inputSchema:{type:'object',properties:{project:{type:'string'},cursor:{type:'string'}},required:['project']}},
   {
     name: 'submit_map_update',
     description:
@@ -391,7 +385,6 @@ async function main() {
       let text;
       if (req.params.name === 'list_thinking_maps') text = await handleList(supabase);
       else if (req.params.name === 'read_thinking_map') text = await handleRead(supabase, args);
-      else if (req.params.name === 'read_thinking_map_sources') text = await handleSources(supabase, args);
       else if (req.params.name === 'submit_map_update') text = await handleSubmit(supabase, args);
       else throw new Error(`未知工具：${req.params.name}`);
       return { content: [{ type: 'text', text }] };
