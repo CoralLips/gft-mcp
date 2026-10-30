@@ -24,7 +24,7 @@ import { createClient } from '@supabase/supabase-js';
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { ListToolsRequestSchema, CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema } from '@modelcontextprotocol/sdk/types.js';
-import { groupNodes, renderMap, summarizeLines, humanAge } from './map.mjs';
+import { summarizeLines, humanAge, selectProject, readMemory, sourcePage } from './map.mjs';
 import { buildUpdateInstruction } from './prompts.mjs';
 
 const log = (...args) => console.error('[gft-mcp]', ...args);
@@ -142,43 +142,15 @@ export async function connect() {
 
 // ===== 数据访问 =====
 
-/** 取一张图的原始行 + 项目名；projectQuery 为空则取最近更新的那张。
- *  空图（project 已建、还没长过脉络）也可被指名匹配——返回 isNew:true 的合成空行，
- *  首次 submit 落成真行（2026-8-7 用户拍：用户视角"项目已建"，agent 就必须看得见）。 */
-async function fetchMapRow(supabase, projectQuery) {
-  const [mapsRes, projRes] = await Promise.all([
-    supabase.from('thinking_maps')
-      .select('project_id, nodes, edges, watermarks, doc, updated_at')
-      .order('updated_at', { ascending: false }),
-    supabase.from('projects').select('id, name'),
-  ]);
-  if (mapsRes.error) throw new Error(`读取脉络失败：${mapsRes.error.message}`);
-  const maps = mapsRes.data ?? [];
-  const projects = projRes.data ?? [];
-  const nameOf = id => projects.find(p => p.id === id)?.name ?? '未命名脉络';
-  const emptyProjects = () => projects.filter(p => !maps.some(m => m.project_id === p.id));
-  const othersOf = keepId => [
-    ...maps.filter(m => m.project_id !== keepId).map(m => ({ name: nameOf(m.project_id) })),
-    ...emptyProjects().filter(p => p.id !== keepId).map(p => ({ name: `${p.name}（空）` })),
-  ];
-
-  if (projectQuery?.trim()) {
-    const q = projectQuery.trim().toLowerCase();
-    const hit = maps.find(m => nameOf(m.project_id).toLowerCase().includes(q));
-    if (hit) return { row: hit, name: nameOf(hit.project_id), others: othersOf(hit.project_id), isNew: false };
-    // 图里没有 → 空 project 里找（图还没出生，指名即认）
-    const emptyHit = emptyProjects().find(p => p.name.toLowerCase().includes(q));
-    if (emptyHit) {
-      return {
-        row: { project_id: emptyHit.id, nodes: [], edges: [], watermarks: {}, doc: '', updated_at: null },
-        name: emptyHit.name, others: othersOf(emptyHit.id), isNew: true,
-      };
-    }
-    const all = [...maps.map(m => nameOf(m.project_id)), ...emptyProjects().map(p => `${p.name}（空）`)];
-    throw new Error(`没有名字含「${projectQuery}」的脉络。可选：${all.join('、')}`);
-  }
-  if (!maps.length) return null;
-  return { row: maps[0], name: nameOf(maps[0].project_id), others: othersOf(maps[0].project_id), isNew: false };
+/** Resolve an explicit stable ID/name before fetching one topic. */
+async function fetchMapRow(supabase, projectQuery, columns = 'project_id, nodes, edges, watermarks, doc, updated_at') {
+  const projectsResult = await supabase.from('projects').select('id, name');
+  if (projectsResult.error) throw new Error(`读取项目失败：${projectsResult.error.message}`);
+  const selected = selectProject(projectsResult.data ?? [], projectQuery);
+  const mapsResult = await supabase.from('thinking_maps').select(columns).eq('project_id',selected.id).maybeSingle();
+  if (mapsResult.error) throw new Error(`读取脉络失败：${mapsResult.error.message}`);
+  return {name:selected.name,others:[],isNew:!mapsResult.data,
+    row:mapsResult.data ?? {project_id:selected.id,nodes:[],edges:[],watermarks:{},doc:'',raw:'',updated_at:null}};
 }
 
 const EMPTY_HINT = '你在 GFT 里还没有思维脉络。先去 gitforthought.com 聊一段并生成脉络，再回来。';
@@ -189,12 +161,13 @@ async function handleList(supabase) {
   // 用户视角"项目已建"而 agent 看不见=两边对"存在"的定义不同步（2026-8-7 用户拍：不符直觉）
   const [mapsRes, projRes] = await Promise.all([
     supabase.from('thinking_maps')
-      .select('project_id, nodes, watermarks, updated_at')
+      .select('project_id, nodes, watermarks, doc, updated_at')
       .order('updated_at', { ascending: false }),
     supabase.from('projects').select('id, name'),
   ]);
   if (mapsRes.error) throw new Error(`读取失败：${mapsRes.error.message}`);
   const maps = mapsRes.data ?? [];
+  if (projRes.error) throw new Error(`读取项目失败：${projRes.error.message}`);
   const projects = projRes.data ?? [];
   if (!maps.length && !projects.length) return EMPTY_HINT;
 
@@ -205,34 +178,24 @@ async function handleList(supabase) {
     const count = (m.nodes ?? []).filter(n => !n.condensedInto).length;
     const lines = summarizeLines(m.nodes, m.watermarks)
       .map(l => `${l.label} ${humanAge(l.at)}`).join(' · ');
-    return `${i + 1}. ${nameOf(m.project_id)} — ${count} 条${lines ? ` · ${lines}` : ''}`;
+    const scope = (m.doc || '').match(/^##? 主题[^\n]*\n([\s\S]*?)(?=^##? |$(?![\s\S]))/m)?.[1]?.trim() || '';
+    return `${i + 1}. ${nameOf(m.project_id)} [${m.project_id}] — ${count} 条 · 版本 ${m.updated_at || '未生成'}${lines ? ` · ${lines}` : ''}${scope ? `\n   范围：${scope.slice(0,300)}` : ''}`;
   });
   const emptyRows = empties.map((p, i) =>
-    `${maps.length + i + 1}. ${p.name} — 空 · 还没长过脉络（可直接链接，首次存判断时自动建图）`);
+    `${maps.length + i + 1}. ${p.name} [${p.id}] — 空 · 还没长过脉络（可直接链接，首次存判断时自动建图）`);
   return [
     `你的思维脉络（${maps.length + empties.length} 张${empties.length ? `，其中 ${empties.length} 张空` : ''}）：`,
     ...rows,
     ...emptyRows,
     '',
-    '要用哪张：read_thinking_map(project=图名) 把它带进本场（即「链接」）。',
+    '要用哪张：read_thinking_map(project=稳定ID或明确图名) 把它带进本场（即「链接」）。',
   ].join('\n');
 }
 
-async function handleRead(supabase, { project, for_update }) {
+async function handleRead(supabase, { project, for_update, node_ids }) {
   const found = await fetchMapRow(supabase, project);
-  if (!found) return EMPTY_HINT;
-
-  const { row, name, others } = found;
-  const newborn = found.isNew
-    ? `（「${name}」还是一张空图——直接开聊即可；之后 submit_map_update 首次提交会自动建图。）\n\n`
-    : '';
-  // 白盒文档 = 判断正本全文（2026-09-01 对齐：此前只回图=只给了目录，正本出不了门）。
-  // 老图没有 doc 属正常（文档 8-22 才诞生）——为空时整段省略，不做迁移。
-  const docText = (row.doc ?? '').trim();
-  const docSection = docText
-    ? `\n\n# 白盒文档（判断正本全文——图是它的目录，锚 ^jN 对应图上节点）\n\n${docText}`
-    : '';
-  const readable = newborn + renderMap(name, groupNodes(row.nodes, row.edges), others) + docSection;
+  const { row, name } = found;
+  const readable = JSON.stringify(readMemory(name,row,node_ids),null,2);
   if (!for_update) return readable;
 
   // 更新模式：附各线水位 + 提交指引（写入归一后不再下发抽取规则——生成归平台）
@@ -276,6 +239,11 @@ async function handleSubmit(supabase, { project, raw_text, cursor, agent_id }) {
 
 // ===== MCP =====
 
+async function handleSources(supabase,{project,cursor}) {
+  const {row} = await fetchMapRow(supabase,project,'project_id, raw, updated_at');
+  return JSON.stringify(sourcePage(row.project_id,row.raw || '',cursor),null,2);
+}
+
 const TOOLS = [
   {
     name: 'list_thinking_maps',
@@ -288,11 +256,11 @@ const TOOLS = [
   {
     name: 'read_thinking_map',
     description:
-      '读取用户在 GFT（gitforthought.com）里逐条确认过的思考资产——他的「思维脉络」：' +
+      '读取用户在 GFT（gitforthought.com）里持续维护的主题记忆——他的「思维脉络」：' +
       '已经想通的判断、还悬着的问题、已经否决的方向。\n' +
       '什么时候调用：用户提到他之前的判断/想法/正在纠结的问题时；' +
       '或你要给出建议、而这个建议应该建立在他已有的思考之上时；或他直接说「读一下我的脉络」时。\n' +
-      '一场会话拉一次即可——内容不会在对话中途改变，反复调用只是浪费用户的 token。\n' +
+      '先查看索引的更新时间；已加载且未变化时复用，用户修改或内容缺失时重读。默认只返回 Doc 与精简图结构；细节传 node_ids，来源用 read_thinking_map_sources。\n' +
       '选图：本场聊过哪张就继续用哪张；语境不明且用户没指名时，把返回里列出的可选项目报给用户挑，' +
       '**不要赌"最近更新的那张"**——那可能是用户在别的 session 里喂的图。\n' +
       '若用户要把这场对话的新内容存进脉络，用 for_update=true 再调一次：' +
@@ -300,11 +268,14 @@ const TOOLS = [
     inputSchema: {
       type: 'object',
       properties: {
-        project: { type: 'string', description: '按项目名模糊匹配指定读哪张脉络。不传 = 最近更新的那张（多数情况不用传）。' },
+        project: { type: 'string', description: '必填：索引中的稳定项目 ID 或唯一名称；缺失或名称有歧义时不会猜选。' },
+        node_ids: {type:'array',items:{type:'string'},minItems:1,maxItems:20,description:'仅需节点完整表述时，传上次读取返回的节点 ID。'},
         for_update: { type: 'boolean', description: '要往脉络里存新内容时传 true，会附带各线水位与提交指引。默认 false。' },
       },
+      required: ['project'],
     },
   },
+  {name:'read_thinking_map_sources',description:'按明确主题分页读取已接收的 Log 来源。仅在核对依据时使用；每页最多12000字符，用 nextCursor 继续；不含尚未导入的原聊天。旧版提取记录不等于完整原文。',inputSchema:{type:'object',properties:{project:{type:'string'},cursor:{type:'string'}},required:['project']}},
   {
     name: 'submit_map_update',
     description:
@@ -420,6 +391,7 @@ async function main() {
       let text;
       if (req.params.name === 'list_thinking_maps') text = await handleList(supabase);
       else if (req.params.name === 'read_thinking_map') text = await handleRead(supabase, args);
+      else if (req.params.name === 'read_thinking_map_sources') text = await handleSources(supabase, args);
       else if (req.params.name === 'submit_map_update') text = await handleSubmit(supabase, args);
       else throw new Error(`未知工具：${req.params.name}`);
       return { content: [{ type: 'text', text }] };
@@ -516,7 +488,7 @@ async function loginWeb() {
 
   writeCachedRefreshToken(result.refresh_token);
   log('✅ 授权成功,独立凭证已落盘', SESSION_FILE);
-  const text = await handleRead(await connect().then(c => c.supabase), {}).catch(() => null);
+  const text = await handleList(await connect().then(c => c.supabase)).catch(() => null);
   if (text) log(`✅ 验证可读(${text.length} 字符)`);
 }
 
@@ -538,7 +510,7 @@ async function login() {
   if (error || !data?.session) throw new Error(`登录失败：${error?.message ?? '未拿到会话'}`);
   writeCachedRefreshToken(data.session.refresh_token);
   log('✅ 登录成功,凭证已存到', SESSION_FILE);
-  const text = await handleRead(supabase, {});
+  const text = await handleList(supabase);
   log(text === EMPTY_HINT ? '⚠ 但你还没有思维脉络' : `✅ 能读到脉络（${text.length} 字符）`);
 }
 
@@ -553,7 +525,7 @@ async function check() {
   }
   const project = process.argv[3]?.startsWith('--') ? undefined : process.argv[3];
   const forUpdate = process.argv.includes('--for-update');
-  const text = await handleRead(supabase, { project, for_update: forUpdate });
+  const text = project ? await handleRead(supabase, { project, for_update: forUpdate }) : await handleList(supabase);
   log(`✅ 读取成功，${text.length} 字符\n`);
   console.log(text);
 }
@@ -583,7 +555,7 @@ async function cliList() {
 async function cliRead() {
   const { supabase } = await connect();
   const project = process.argv[3]?.startsWith('--') ? undefined : process.argv[3];
-  console.log(await handleRead(supabase, { project, for_update: process.argv.includes('--for-update') }));
+  console.log(project ? await handleRead(supabase, { project, for_update: process.argv.includes('--for-update') }) : await handleList(supabase));
 }
 
 /** gft-mcp save —— 无法纯程序化,指路 */
