@@ -26,8 +26,10 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { ListToolsRequestSchema, CallToolRequestSchema, ListPromptsRequestSchema, GetPromptRequestSchema } from '@modelcontextprotocol/sdk/types.js';
 import { summarizeLines, humanAge, selectProject, readMemory } from './map.mjs';
 import { buildUpdateInstruction } from './prompts.mjs';
+import { useProxy } from './proxy.mjs';
 
 const log = (...args) => console.error('[gft-mcp]', ...args);
+useProxy();
 
 /**
  * 外部来源的水位 key 前缀——与 GFT 内部的 { sessionId: lastMessageId } 并存,互不干扰。
@@ -131,6 +133,10 @@ export async function connect() {
       return { supabase, userId: data.session.user.id };
     }
     lastErr = error;
+    // 网络不通不是登录失效：重新授权也会卡在同一处，直接说清楚
+    if (error?.name === 'AuthRetryableFetchError') {
+      throw new Error(`连不上 GFT 账号服务（${error.message}），凭证仍保留，网络恢复后重试即可。`);
+    }
     await new Promise(r => setTimeout(r, 300)); // 给并发进程一拍时间把新 token 落盘,再读一次
   }
   throw new Error(
@@ -344,7 +350,7 @@ const PROMPTS = [
 ];
 
 async function main() {
-  const server = new Server({ name: 'gft', version: '0.3.0' }, { capabilities: { tools: {}, prompts: {} } });
+  const server = new Server({ name: 'gft', version: '0.3.1' }, { capabilities: { tools: {}, prompts: {} } });
 
   server.setRequestHandler(ListPromptsRequestSchema, async () => {
     // 分层让位（2026-8-7 用户拍）：Claude Code 环境有 plugin 那套优化命令（hook 秒回），
