@@ -344,7 +344,7 @@ const PROMPTS = [
 ];
 
 async function main() {
-  const server = new Server({ name: 'gft', version: '0.2.0' }, { capabilities: { tools: {}, prompts: {} } });
+  const server = new Server({ name: 'gft', version: '0.3.0' }, { capabilities: { tools: {}, prompts: {} } });
 
   server.setRequestHandler(ListPromptsRequestSchema, async () => {
     // 分层让位（2026-8-7 用户拍）：Claude Code 环境有 plugin 那套优化命令（hook 秒回），
