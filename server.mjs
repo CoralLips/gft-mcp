@@ -233,13 +233,35 @@ async function handleSubmit(supabase, { project, raw_text, cursor, agent_id }) {
   if (json?.noop) return json.message ?? '这段对话没有需要记的新判断（noop）。';
 
   // 返回值是**给用户看的**：写了什么必须当场说清,否则等于偷偷改他的东西
-  const lines = [
-    `✅ 已并入「${json.project}」（GFT 平台管道生成，与网页端同一份规则）：` +
-      `新增 ${json.added?.length ?? 0} 条判断、写入 ${json.entries ?? 0} 条文档条目${json.marks ? `、改标 ${json.marks} 处` : ''}。`,
-    ...(json.added ?? []).map(t => `  + ${t}`),
-    '',
-    `图上现有 ${json.totalNodes} 条判断，白盒文档 ${json.docChars} 字。新节点带未读标记,去 GFT 点开即消；不认同就直接删。`,
-  ];
+  const c = json.changes;
+  const lines = c
+    ? [
+        `✅ 已并入「${json.project}」（GFT 平台管道生成，与网页端同一份规则）：` +
+          [
+            `新增 ${c.added.length} 条判断`,
+            c.merged.length && `合并旧判断 ${c.merged.length} 处`,
+            c.removed.length && `删去 ${c.removed.length} 条`,
+            c.revised.length && `改写 ${c.revised.length} 条`,
+            json.marks && `改标 ${json.marks} 处`,
+            c.chapters && `正文改了 ${c.chapters} 章`,
+          ].filter(Boolean).join('、') + '。',
+        ...c.added.map(j => `  + ${j.title}${j.absorbed.length ? `（并入旧判断：${j.absorbed.join('、')}）` : ''}`),
+        ...c.merged.map(j => `  ⊕ ${j.title} ← ${j.from.join(' + ')}`),
+        ...c.removed.map(t => `  − ${t}`),
+        ...c.revised.map(t => `  ~ ${t}`),
+        ...(c.tidied ? ['图满了，已让模型把新旧判断一起整理到上限以内。'] : []),
+        ...(c.tidied && c.forced ? [`其中 ${c.forced} 处是系统按位置兜底合并的，读着别扭可以在 GFT 里再点一次“整理”。`] : []),
+        ...(c.tidyError ? [`整理没成功（${c.tidyError}），已先按位置合并到上限以内。`] : []),
+        '',
+        `图上现有 ${json.totalNodes} 条判断，白盒文档 ${json.docChars} 字。新节点带未读标记,去 GFT 点开即消；不认同就直接删。`,
+      ]
+    : [
+        `✅ 已并入「${json.project}」（GFT 平台管道生成，与网页端同一份规则）：` +
+          `新增 ${json.added?.length ?? 0} 条判断、写入 ${json.entries ?? 0} 条文档条目${json.marks ? `、改标 ${json.marks} 处` : ''}。`,
+        ...(json.added ?? []).map(t => `  + ${t}`),
+        '',
+        `图上现有 ${json.totalNodes} 条判断，白盒文档 ${json.docChars} 字。新节点带未读标记,去 GFT 点开即消；不认同就直接删。`,
+      ];
   return lines.join('\n');
 }
 
